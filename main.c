@@ -345,18 +345,19 @@ void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,Ve
 				float bInDir=dot(b,dir);
 
 				assert(min(aInDir,bInDir)<sweepT+.00001f);
-				assert(sweepT<max(aInDir,bInDir));
+				// assert(sweepT<max(aInDir,bInDir));
 
 				float d=bInDir-aInDir;
 				float t=(sweepT-aInDir)/(bInDir-aInDir);
 				
-				assert(t>=0 && t<=1);
-				Vertex intersection={
-					a.x+t*(b.x-a.x),
-					a.y+t*(b.y-a.y),
-					a.z // z const in layer
-				};
-				intersections.push_back(intersection);
+				if(t>=0 && t<=1){ // for manifolds this should always be true
+					Vertex intersection={
+						a.x+t*(b.x-a.x),
+						a.y+t*(b.y-a.y),
+						a.z // z const in layer
+					};
+					intersections.push_back(intersection);
+				}
 			}
 //			assert(intersections.size() % 2 == 0);
 
@@ -557,7 +558,6 @@ void buildSegments(int layerIndex, Layer& layer)
 
 void saveGcode(const char* filename, std::vector<Layer>& layers)
 {
-
 
 	printf("Saving Gcode...\n");
 	FILE* file=fopen(filename,"w");	
