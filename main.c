@@ -7,6 +7,9 @@
 #include <array>
 #include <math.h>
 #include <exception>
+#include <fstream>
+
+using namespace std;
 
 void error(const char* message){
 	printf("%s\n",message);
@@ -201,7 +204,7 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 	for(int i=0; i<triangles.size(); i++)
 		assert(triangles[i].edges.size()==3);
 */	
-	printf("Loading complete: %d vertices read, %d unique, d triangles.\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
+	printf("Loading complete: %d vertices read, %d unique, %d triangles.\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
 }
 
 void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers)
@@ -297,6 +300,7 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 	}
 	
 	std::vector<Segment> infill;
+//	infill.reserve(1000);
 	
 	std::set<Segment*> sweepHeap;	
 	float y=sweepVertices.begin()->y+grid_spacing;
@@ -320,10 +324,9 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 				}
 
 			}
-			assert(intersections.size() % 2 == 0);
+//			assert(intersections.size() % 2 == 0);
 
 			std::sort(intersections.begin(), intersections.end());
-
 
 //			printf("\t\tSweep at y: %f, x's: ",y);
 			for(int j=0; j<intersections.size(); j++){
@@ -342,9 +345,13 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 			y+=grid_spacing;
 		}
 		
-		std::vector<Segment*> ss=segmentsByVertex[v];
+		std::vector<Segment*>& ss=segmentsByVertex[v];
 		char segments_in_heap=0;
 		char segment_index=-1;
+
+		// ignore non manifold unconnected segments
+		if(ss.size()!=2) continue;
+		
 		for(int j=0; j<ss.size(); j++){
 			assert(ss[j]->vertices[0]==v || ss[j]->vertices[1]==v);
 			if(sweepHeap.count(ss[j])==1) {
@@ -352,8 +359,7 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 				segment_index=j;
 			}
 		}
-		assert(segments_in_heap<=2);
-		
+
 		if(segments_in_heap==0){
 			// a new perimeter is encountered. add it to the heap.
 			sweepHeap.insert(ss[0]);
@@ -366,13 +372,17 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 			// an existing perimeter ends. 
 			sweepHeap.erase (ss[0]);
 			sweepHeap.erase (ss[1]);
-		}else
-			assert(segments_in_heap<=2); // will fail
+		}		
+		// DIRTY: commented out to ignore non manifolds
+		//else
+		//	assert(segments_in_heap<=2); // will fail. 
 			
 		
 		
 	}
-	assert(sweepHeap.size()==0);
+
+	// DIRTY: commented out to ignore non manifolds
+	//	assert(sweepHeap.size()==0);
 	
 	layer.segments.insert(layer.segments.end(),infill.begin(),infill.end());
 }
@@ -391,8 +401,12 @@ void buildSegments(Layer& layer)
 			{NULL,NULL},
 			-1
 		};
-		if(s.vertices[0]!=s.vertices[1]) 
+		if(s.vertices[0]!=s.vertices[1]) {
+		
+	//		s.orderIndex=i; // TODO do better ordering
+
 			layer.segments.push_back(s);
+		}
 	}
 	
 	// unify segment end vertices
@@ -412,7 +426,7 @@ void buildSegments(Layer& layer)
 		std::vector<Segment*>& ss=i->second;
 		
 		if(ss.size()==1) error("Unconnected segment");
-		if(ss.size()>2 ) error("Non manifold segment");
+//		if(ss.size()>2 ) error("Non manifold segment");
 		
 		Vertex v=i->first;
 		
@@ -453,36 +467,38 @@ void buildSegments(Layer& layer)
 	}
 
 	// check for dangling segments (caused by disconnected triangles)
-	for(int i=0; i<layer.segments.size(); i++)
+/*	for(int i=0; i<layer.segments.size(); i++)
 		for(int j=0; j<2; j++)
 			if(layer.segments[i].neighbours[j]==NULL) {
 				printf("Unconnected segment: %d %d\n",i,j);
 				throw 0;
 			}
-	
+*/	
 		
 	// now order the segments into consecutive loops. 
 	int loops=0;
 	int orderIndex=0;
 	for(int i=0; i<layer.segments.size(); i++){
 		Segment& segment=layer.segments[i];
-		
+
 		// only handle new loops
 		if(segment.orderIndex!=-1) continue;
-		
+				
 		// collect a loop
 		Segment* s2=&segment;
 		while(true){
 			s2->orderIndex=orderIndex++;
-			if     (s2->neighbours[0]->orderIndex==-1)
+			// DIRTY: check for NULL neighbours resulting from non manifolds
+			if     (s2->neighbours[0] != NULL && s2->neighbours[0]->orderIndex==-1)
 				s2=s2->neighbours[0];
-			else if(s2->neighbours[1]->orderIndex==-1)
+			else if(s2->neighbours[1] != NULL && s2->neighbours[1]->orderIndex==-1)
 				s2=s2->neighbours[1];
 			else break;
 		};
 		
 		// the loop should be closed:
-		assert(s2->neighbours[0]==&segment || s2->neighbours[1]==&segment);
+		// DIRTY: ignore check to accept non manifolds		
+//		assert(s2->neighbours[0]==&segment || s2->neighbours[1]==&segment);
 		
 		loops++;
 	}
@@ -499,6 +515,8 @@ void buildSegments(Layer& layer)
 void saveGcode(const char* filename, std::vector<Layer>& layers)
 {
 
+
+	printf("Saving Gcode...\n");
 	FILE* file=fopen(filename,"w");	
 /*
 G92 E0
@@ -512,11 +530,17 @@ G1 X90.263 Y90.787 E3.27524
 G1 F1800.000 E2.27524
 
 */
-
 	float extrusionFactor=0.0294f;
 	float retractLength=1.f;
 
 	Vertex offset={75.f, 75.f, 0.f};
+	Vertex position={0,0,0};
+
+	int travels=0, extrusions=0;
+	int travelsSkipped=0, extrusionsSkipped=0;
+	float travelled=0, extruded=0;
+
+	float skipDistance=.01;
 
 	for(int i=0; i<layers.size(); i++){
 		Layer& l=layers[i];
@@ -529,13 +553,30 @@ G1 F1800.000 E2.27524
 			Vertex& v1=l.segments[j].vertices[1];
 			assert(v0.z==l.z);
 			assert(v1.z==l.z);
-			fprintf(file,"G1 X%f Y%f\n",v0.x+offset.x,v0.y+offset.y);
+			
+			if(distance(v1,position)<distance(v0,position))
+				swap(v0,v1);
+			
+			if(distance(v0,position)>skipDistance){
+				fprintf(file,"G1 X%f Y%f\n",v0.x+offset.x,v0.y+offset.y);
+				travels++;
+				travelled+=distance(v0,position);
+			}else
+				travelsSkipped++;
+			position=v0;
 			extrusion+=extrusionFactor*distance(v0,v1);
-			fprintf(file,"G1 X%f Y%f E%f\n",v1.x+offset.x,v1.y+offset.y,extrusion);
+			if(distance(v1,position)>skipDistance){
+				fprintf(file,"G1 X%f Y%f E%f\n",v1.x+offset.x,v1.y+offset.y,extrusion);
+				extrusions++;
+				extruded+=distance(v1,position);
+			}else
+				extrusionsSkipped++;
+			position=v1;
 		}
 		extrusion-=retractLength;
 		fprintf(file, "G1 F1800.000 E%f\n",extrusion); // retraction restart		
 	}	
+	printf("Saving complete. %d bytes written. %d travels %.0f mm, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, travelled, extrusions, extruded, travelsSkipped, extrusionsSkipped);
 }
 
 int main(int argc, const char** argv)
@@ -565,7 +606,7 @@ int main(int argc, const char** argv)
 			printf("\tSegment (%f,%f,%f) to (%f,%f,%f)\n",v0.x,v0.y,v0.z,v1.x,v1.y,v1.z);
 		}
 	}*/
-
+	
 	saveGcode(argv[2],layers);
 	//std::map<int,std::vector<int>> trianglesByVertex;
 
