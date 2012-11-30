@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <vector>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <array>
 #include <math.h>
@@ -15,7 +16,7 @@ void error(const char* message){
 struct Vertex{
 	float x,y,z;
 	
-	bool operator==(Vertex& b){
+	bool operator==(const Vertex& b) const{
 		return this->x==b.x && this->y==b.y && this->z==b.z;
 	}
 };
@@ -24,6 +25,13 @@ bool operator!=(Vertex& a, Vertex& b){
 	return !(a==b);
 }
 
+bool operator<(const Vertex& a, const Vertex& b)
+{
+	return 
+		a.z< b.z             ||
+		a.z==b.z && a.y< b.y ||
+		a.z==b.z && a.y==b.y && a.x<b.x;
+}
 
 struct Triangle
 {
@@ -49,6 +57,38 @@ struct Segment
 		return this->orderIndex<other.orderIndex;
 	}
 };
+
+
+/*
+// segment left-to-right order assuming segments dont cross
+struct SegmentLeftOf
+{
+	bool operator() (const Segment* a, const Segment* b) const
+	{
+	
+		Vertex a_bottom=a->vertices[0], a_top=a->vertices[1];
+		if(a_bottom.y>a_top.y) std::swap(a_bottom, a_top);
+		
+		Vertex b0=b->vertices[0], b1=b->vertices[1];
+		
+		// select one of b's verticies inside a's height interval
+		Vertex bm;
+		if      (b0.y>=a_bottom.y && b0.y<=a_top.y) bm=b0;
+		else if (b1.y>=a_bottom.y && b1.y<=a_top.y) bm=b1;
+		else {
+			printf("%f %f %f %f\n", a_bottom.y, a_top.y, b0.y, b1.y);
+			assert(!"aua");
+		}
+		
+		// project chosen b vertex onto a
+		float t=(bm.y-a_bottom.y)/(a_top.y-a_bottom.y);
+		float x=a_bottom.x+t*(a_top.x-a_bottom.x);
+		
+		// if projected point on a is left of bm, a is left of bm.
+		return x<bm.x;
+	};
+};
+*/
 
 struct Layer
 {
@@ -138,7 +178,7 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 	}
 
 	// compute edges
-	std::map<std::pair<Vertex*,Vertex*>,Triangle*> uniqueEdges;
+/*	std::map<std::pair<Vertex*,Vertex*>,Triangle*> uniqueEdges;
 	for(int i=0; i<triangles.size(); i++)
 	{
 		Triangle& t=triangles[i];
@@ -160,8 +200,8 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 
 	for(int i=0; i<triangles.size(); i++)
 		assert(triangles[i].edges.size()==3);
-	
-	printf("Loading complete: %d vertices read, %d unique, %d edges, %d triangles.\n",(int)indices.size(),(int)vertices.size(),(int)uniqueEdges.size(),(int)triangles.size());
+*/	
+	printf("Loading complete: %d vertices read, %d unique, d triangles.\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
 }
 
 void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers)
@@ -245,6 +285,98 @@ std::array<Vertex,2> computeSegment(Triangle& t, float z)
 	
 	return segment;
 }
+
+void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> segmentsByVertex)
+{
+	float grid_spacing=0.5f;
+	
+	std::set<Vertex,VertexLessThan> sweepVertices;
+	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
+		assert(i->first.z==layer.z);
+		sweepVertices.insert(i->first);
+	}
+	
+	std::vector<Segment> infill;
+	
+	std::set<Segment*> sweepHeap;	
+	float y=sweepVertices.begin()->y+grid_spacing;
+	for(std::set<Vertex>::iterator i=sweepVertices.begin(); i!=sweepVertices.end(); ++i)
+	{
+		const Vertex& v=*i;
+		
+		while(v.y>y){
+			std::vector<Vertex> intersections;
+			for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
+				Segment& s=**j;
+				Vertex& a=s.vertices[0], &b=s.vertices[1];
+				float t=(y-a.y)/(b.y-a.y);
+				if(t>=0 && t<1){
+					Vertex intersection={
+						a.x+t*(b.x-a.x),
+						y,  // exact intersection 
+						a.z // z const in layer
+					};
+					intersections.push_back(intersection);
+				}
+
+			}
+			assert(intersections.size() % 2 == 0);
+
+			std::sort(intersections.begin(), intersections.end());
+
+
+//			printf("\t\tSweep at y: %f, x's: ",y);
+			for(int j=0; j<intersections.size(); j++){
+				if(j%2==1) {
+					Segment s={
+						NULL,
+						{intersections[j-1],intersections[j]},
+						{NULL,NULL},
+						(j+1)*0xFFF
+					};
+					infill.push_back(s);
+				}
+			}
+//				printf("%f ",intersections[j].x);
+//			printf("\n");	
+			y+=grid_spacing;
+		}
+		
+		std::vector<Segment*> ss=segmentsByVertex[v];
+		char segments_in_heap=0;
+		char segment_index=-1;
+		for(int j=0; j<ss.size(); j++){
+			assert(ss[j]->vertices[0]==v || ss[j]->vertices[1]==v);
+			if(sweepHeap.count(ss[j])==1) {
+				segments_in_heap++;
+				segment_index=j;
+			}
+		}
+		assert(segments_in_heap<=2);
+		
+		if(segments_in_heap==0){
+			// a new perimeter is encountered. add it to the heap.
+			sweepHeap.insert(ss[0]);
+			sweepHeap.insert(ss[1]);
+		}else if(segments_in_heap==1){
+			// an existing perimeter continues, segment_index must be it's index.
+			sweepHeap.erase (ss[  segment_index]);
+			sweepHeap.insert(ss[1-segment_index]);
+		}else if(segments_in_heap==2){
+			// an existing perimeter ends. 
+			sweepHeap.erase (ss[0]);
+			sweepHeap.erase (ss[1]);
+		}else
+			assert(segments_in_heap<=2); // will fail
+			
+		
+		
+	}
+	assert(sweepHeap.size()==0);
+	
+	layer.segments.insert(layer.segments.end(),infill.begin(),infill.end());
+}
+
 
 void buildSegments(Layer& layer)
 {
@@ -354,11 +486,15 @@ void buildSegments(Layer& layer)
 		
 		loops++;
 	}
-	std::sort(layer.segments.begin(), layer.segments.end());
-	// caution: the neighbour[..] pointers are invalid now!
 	
-	printf("\tTriangles: %d, segments: %d, vertices: %d, loops: %d\n",(int)layer.triangles.size(),(int)layer.segments.size(),(int)segmentsByVertex.size(),loops);
+	// printf("\tTriangles: %d, segments: %d, vertices: %d, loops: %d\n",(int)layer.triangles.size(),(int)layer.segments.size(),(int)segmentsByVertex.size(),loops);
+
+	fill(layer,segmentsByVertex);
+	// caution: the neighbour[..] and other segment pointers are invalid now!	
+
+	std::sort(layer.segments.begin(), layer.segments.end());
 }
+
 
 void saveGcode(const char* filename, std::vector<Layer>& layers)
 {
