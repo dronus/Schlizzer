@@ -24,6 +24,15 @@ struct Vertex{
 	}
 };
 
+float dot(const Vertex& a, const Vertex& b){
+	return a.x*b.x+a.y*b.y+a.z*b.z;
+}
+Vertex operator-(const Vertex& a, const Vertex& b)
+{
+	Vertex r={a.x-b.x,a.y-b.y,a.z-b.z};
+	return r;
+}
+
 bool operator!=(Vertex& a, Vertex& b){
 	return !(a==b);
 }
@@ -54,7 +63,7 @@ struct Segment
 	Triangle* triangle;
 	std::array<Vertex,2> vertices;
 	std::array<Segment*,2> neighbours;
-	int orderIndex;
+	long orderIndex;
 	
 	bool operator<(const Segment& other)const{
 		return this->orderIndex<other.orderIndex;
@@ -114,6 +123,18 @@ class VertexLessThan
 			a.z< b.z             ||
 			a.z==b.z && a.y< b.y ||
 			a.z==b.z && a.y==b.y && a.x<b.x;
+	}
+};
+
+struct VertexSweepOrder
+{
+	Vertex dir;
+	VertexSweepOrder(Vertex _dir){
+		dir=_dir;
+	}
+	bool operator() (const Vertex& a, const Vertex& b) const
+	{
+		return dot(a,dir)<dot(b,dir); 
 	}
 };
 
@@ -289,11 +310,21 @@ std::array<Vertex,2> computeSegment(Triangle& t, float z)
 	return segment;
 }
 
-void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> segmentsByVertex)
+void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> segmentsByVertex)
 {
-	float grid_spacing=0.5f;
+	float grid_spacing=1.5f;
 	
-	std::set<Vertex,VertexLessThan> sweepVertices;
+	Vertex dir          ={sqrt(2.f),sqrt(2.f),0};
+	Vertex dirOrthogonal={dir.y,-dir.x,0};
+	
+	if(layerIndex%2==0) 
+		swap(dir,dirOrthogonal);
+	
+	VertexSweepOrder order          (dir);
+	VertexSweepOrder orderOrthogonal(dirOrthogonal);
+	
+	
+	std::set<Vertex,VertexSweepOrder> sweepVertices(order);
 	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
 		assert(i->first.z==layer.z);
 		sweepVertices.insert(i->first);
@@ -303,21 +334,29 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 //	infill.reserve(1000);
 	
 	std::set<Segment*> sweepHeap;	
-	float y=sweepVertices.begin()->y+grid_spacing;
+	float sweepT=dot(*sweepVertices.begin(),dir)+grid_spacing;
+	long orderIndex=0;
 	for(std::set<Vertex>::iterator i=sweepVertices.begin(); i!=sweepVertices.end(); ++i)
 	{
 		const Vertex& v=*i;
 		
-		while(v.y>y){
+		while(dot(v,dir)>sweepT){		
 			std::vector<Vertex> intersections;
+
 			for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
 				Segment& s=**j;
 				Vertex& a=s.vertices[0], &b=s.vertices[1];
-				float t=(y-a.y)/(b.y-a.y);
-				if(t>=0 && t<1){
+				
+				float aInDir=dot(a,dir);
+				float bInDir=dot(b,dir);
+				float d=bInDir-aInDir;
+				float t=(sweepT-aInDir)/(bInDir-aInDir);
+				
+				if(t>=0 && t<=1)
+				{
 					Vertex intersection={
 						a.x+t*(b.x-a.x),
-						y,  // exact intersection 
+						a.y+t*(b.y-a.y),
 						a.z // z const in layer
 					};
 					intersections.push_back(intersection);
@@ -326,23 +365,30 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 			}
 //			assert(intersections.size() % 2 == 0);
 
-			std::sort(intersections.begin(), intersections.end());
+			std::sort(intersections.begin(), intersections.end(),orderOrthogonal);
 
 //			printf("\t\tSweep at y: %f, x's: ",y);
+			long pathIndex=0;
 			for(int j=0; j<intersections.size(); j++){
-				if(j%2==1) {
+				//printf(" %lf ",dot(intersections[j],dirOrthogonal));
+				if(j%2==1 && distance(intersections[j-1],intersections[j])>0.1) {
 					Segment s={
 						NULL,
 						{intersections[j-1],intersections[j]},
 						{NULL,NULL},
-						(j+1)*0xFFF
+						pathIndex<<16 + orderIndex
+						 
 					};
+
 					infill.push_back(s);
+					pathIndex++;
 				}
 			}
-//				printf("%f ",intersections[j].x);
+//			printf("\n %d ",intersections.size());
+//			printf("%d ",intersections.size());
 //			printf("\n");	
-			y+=grid_spacing;
+			sweepT+=grid_spacing;
+			orderIndex++;
 		}
 		
 		std::vector<Segment*>& ss=segmentsByVertex[v];
@@ -384,11 +430,12 @@ void fill(Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> se
 	// DIRTY: commented out to ignore non manifolds
 	//	assert(sweepHeap.size()==0);
 	
+	//DEBUG layer.segments.clear();
 	layer.segments.insert(layer.segments.end(),infill.begin(),infill.end());
 }
 
 
-void buildSegments(Layer& layer)
+void buildSegments(int layerIndex, Layer& layer)
 {
 
 	// generate segments by intersecting the triangles touching this layer
@@ -477,7 +524,7 @@ void buildSegments(Layer& layer)
 		
 	// now order the segments into consecutive loops. 
 	int loops=0;
-	int orderIndex=0;
+	long orderIndex=0;
 	for(int i=0; i<layer.segments.size(); i++){
 		Segment& segment=layer.segments[i];
 
@@ -505,7 +552,7 @@ void buildSegments(Layer& layer)
 	
 	// printf("\tTriangles: %d, segments: %d, vertices: %d, loops: %d\n",(int)layer.triangles.size(),(int)layer.segments.size(),(int)segmentsByVertex.size(),loops);
 
-	fill(layer,segmentsByVertex);
+	fill(layerIndex, layer,segmentsByVertex);
 	// caution: the neighbour[..] and other segment pointers are invalid now!	
 
 	std::sort(layer.segments.begin(), layer.segments.end());
@@ -536,7 +583,7 @@ G1 F1800.000 E2.27524
 	Vertex offset={75.f, 75.f, 0.f};
 	Vertex position={0,0,0};
 
-	int travels=0, extrusions=0;
+	int travels=0, longTravels=0, extrusions=0;
 	int travelsSkipped=0, extrusionsSkipped=0;
 	float travelled=0, extruded=0;
 
@@ -553,6 +600,9 @@ G1 F1800.000 E2.27524
 			Vertex& v1=l.segments[j].vertices[1];
 			assert(v0.z==l.z);
 			assert(v1.z==l.z);
+	
+			fprintf(file,"# %ld\n",l.segments[j].orderIndex);
+			//if(l.segments[j].orderIndex< 1L<<16) continue;
 			
 			if(distance(v1,position)<distance(v0,position))
 				swap(v0,v1);
@@ -560,6 +610,7 @@ G1 F1800.000 E2.27524
 			if(distance(v0,position)>skipDistance){
 				fprintf(file,"G1 X%f Y%f\n",v0.x+offset.x,v0.y+offset.y);
 				travels++;
+				if(distance(v0,position)>20.0f) longTravels++;
 				travelled+=distance(v0,position);
 			}else
 				travelsSkipped++;
@@ -576,7 +627,7 @@ G1 F1800.000 E2.27524
 		extrusion-=retractLength;
 		fprintf(file, "G1 F1800.000 E%f\n",extrusion); // retraction restart		
 	}	
-	printf("Saving complete. %d bytes written. %d travels %.0f mm, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, travelled, extrusions, extruded, travelsSkipped, extrusionsSkipped);
+	printf("Saving complete. %ld bytes written. %d travels %.0f mm, %d long travels, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, longTravels, travelled, extrusions, extruded, travelsSkipped, extrusionsSkipped);
 }
 
 int main(int argc, const char** argv)
@@ -595,7 +646,7 @@ int main(int argc, const char** argv)
 	buildLayers(triangles, layers);
 
 	for(int i=0; i<layers.size(); i++)
-		buildSegments(layers[i]);
+		buildSegments(i,layers[i]);
 
 	/*for(int i=0; i<layers.size(); i++){
 		Layer& l=layers[i];
