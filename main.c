@@ -70,38 +70,6 @@ struct Segment
 	}
 };
 
-
-/*
-// segment left-to-right order assuming segments dont cross
-struct SegmentLeftOf
-{
-	bool operator() (const Segment* a, const Segment* b) const
-	{
-	
-		Vertex a_bottom=a->vertices[0], a_top=a->vertices[1];
-		if(a_bottom.y>a_top.y) std::swap(a_bottom, a_top);
-		
-		Vertex b0=b->vertices[0], b1=b->vertices[1];
-		
-		// select one of b's verticies inside a's height interval
-		Vertex bm;
-		if      (b0.y>=a_bottom.y && b0.y<=a_top.y) bm=b0;
-		else if (b1.y>=a_bottom.y && b1.y<=a_top.y) bm=b1;
-		else {
-			printf("%f %f %f %f\n", a_bottom.y, a_top.y, b0.y, b1.y);
-			assert(!"aua");
-		}
-		
-		// project chosen b vertex onto a
-		float t=(bm.y-a_bottom.y)/(a_top.y-a_bottom.y);
-		float x=a_bottom.x+t*(a_top.x-a_bottom.x);
-		
-		// if projected point on a is left of bm, a is left of bm.
-		return x<bm.x;
-	};
-};
-*/
-
 struct Layer
 {
 	float z;
@@ -153,12 +121,36 @@ float distance(Vertex& a, Vertex& b){
 	b=tmp;
 }*/
 
+std::map<std::string, float> config;
+
+float get(const char* parameter){
+	assert(config.count(parameter)==1);
+	return config[parameter];
+}
+
 void sortTriangleVertices(Triangle& t)
 {
 	Vertex** vs=t.vertices;
 	if(vs[0]->z > vs[1]->z) std::swap(vs[0],vs[1]);
 	if(vs[0]->z > vs[2]->z) std::swap(vs[0],vs[2]);
 	if(vs[1]->z > vs[2]->z) std::swap(vs[1],vs[2]);
+}
+
+void loadConfig(const char* filename){
+	printf("Loading config %s...\n",filename);
+	FILE* file=fopen(filename,"r");	
+	char line[256];
+	while(!feof(file)){
+		if(fgets(line, sizeof(line), file)){
+			char name[256];
+			float value;
+			int found=sscanf(line,"%s = %e",name, &value);
+			if(found) {
+				config[name]=value;
+			}
+		}
+	}
+	fclose(file);
 }
 
 void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Triangle>& triangles)
@@ -245,9 +237,10 @@ void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers)
 
 	std::map<Triangle*,int> triangleRuns;
 
-	float layer_height=0.3f;
 	float min_z=by_z.front().value;
 	float max_z=by_z.back().value;
+	float layer_height=get("layer_height");
+	assert(layer_height>0);
 	printf("Slicing from %f to %f, layers: %d\n",min_z, max_z, (int)((max_z-min_z)/layer_height));
 	float next_layer_z=min_z+layer_height;
 	for(int i=0; i<by_z.size(); i++)
@@ -569,32 +562,30 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 	printf("Saving Gcode...\n");
 	FILE* file=fopen(filename,"w");	
 
-	float filamentDiameter=3.f;
-	float nozzleDiameter=0.5f;
-	float layerHeight=.3f;
-	float filamentArea=3.14159f*filamentDiameter*filamentDiameter/4;
-	float extrusionVolume=nozzleDiameter*layerHeight;
-	
-	float extrusionFactor=extrusionVolume/filamentArea;
-	float retractLength=1.f;
+	float skipDistance=.01;
 
-	Vertex offset={75.f, 75.f, 0.f};
+
+	float dia=get("filament_diameter");
+	float filamentArea=3.14159f*dia*dia/4;
+	float extrusionVolume=get("nozzle_diameter")*get("layer_height");
+	float extrusionFactor=extrusionVolume/filamentArea*get("extrusion_multiplier");
+	
+	float retract_length=get("retract_length");
+	float retract_before_travel=get("retract_before_travel");
+
 	Vertex position={0,0,0};
 
 	int travels=0, longTravels=0, extrusions=0;
 	int travelsSkipped=0, extrusionsSkipped=0;
 	float travelled=0, extruded=0;
 
-	float skipDistance=.01;
-	
-	float retractDistance=1.1f;
+	Vertex offset={75,75,get("z_offset")};
 
 	for(int i=0; i<layers.size(); i++){
 		Layer& l=layers[i];
 		fprintf(file, "G92 E0\n");
-		fprintf(file, "G1 Z%f F7800.000\n",l.z);
-		float extrusion=retractLength;
-		fprintf(file, "G1 F1800.000 E%f\n",extrusion); // retraction restart
+		fprintf(file, "G1 Z%f F7800.000\n",l.z+offset.z);
+		float extrusion=retract_length;
 		for(int j=0; j<l.segments.size(); j++){
 			Vertex& v0=l.segments[j].vertices[0];
 			Vertex& v1=l.segments[j].vertices[1];
@@ -608,14 +599,14 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 			
 			float d=distance(v0,position);
 			if(d>skipDistance){
-				if(d>retractDistance){
-					extrusion-=retractLength;
+				if(d>retract_before_travel){
+					extrusion-=retract_length;
 					fprintf(file,"G1 F1800.0 E%f\n",extrusion);
 					//G92 E0
 				}
 				fprintf(file,"G1 X%f Y%f\n",v0.x+offset.x,v0.y+offset.y);
-				if(d>retractDistance){
-					extrusion+=retractLength;
+				if(d>retract_before_travel){
+					extrusion+=retract_length;
 					fprintf(file,"G1 F1800.0 E%f\n",extrusion);
 					longTravels++;
 				}
@@ -635,8 +626,6 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 				extrusionsSkipped++;
 			
 		}
-		extrusion-=retractLength;
-		fprintf(file, "G1 F1800.000 E%f\n",extrusion); // retraction restart		
 	}	
 	printf("Saving complete. %ld bytes written. %d travels %.0f mm, %d long travels, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, travelled, longTravels, extrusions, extruded, travelsSkipped, extrusionsSkipped);
 }
@@ -647,6 +636,8 @@ int main(int argc, const char** argv)
 		printf("Usage: %s <.stl file> <.gcode file>\n",argv[0]);
 		return 1;
 	}
+
+	loadConfig("config.ini");
 
 	std::vector<Vertex>   vertices;
 	std::vector<Triangle> triangles;
