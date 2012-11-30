@@ -312,9 +312,9 @@ std::array<Vertex,2> computeSegment(Triangle& t, float z)
 
 void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,VertexLessThan> segmentsByVertex)
 {
-	float grid_spacing=1.5f;
+	float grid_spacing=.5f;
 	
-	Vertex dir          ={sqrt(2.f),sqrt(2.f),0};
+	Vertex dir          ={sqrt(2.f)/2,sqrt(2.f)/2,0};
 	Vertex dirOrthogonal={dir.y,-dir.x,0};
 	
 	if(layerIndex%2==0) 
@@ -323,20 +323,21 @@ void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,Ve
 	VertexSweepOrder order          (dir);
 	VertexSweepOrder orderOrthogonal(dirOrthogonal);
 	
-	
-	std::set<Vertex,VertexSweepOrder> sweepVertices(order);
+	std::vector<Vertex> sweepVertices;
+	sweepVertices.reserve(segmentsByVertex.size());
 	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
 		assert(i->first.z==layer.z);
-		sweepVertices.insert(i->first);
+		sweepVertices.push_back(i->first);
 	}
-	
+	std::sort(sweepVertices.begin(),sweepVertices.end(),VertexSweepOrder(dir));
+		
 	std::vector<Segment> infill;
 //	infill.reserve(1000);
 	
 	std::set<Segment*> sweepHeap;	
 	float sweepT=dot(*sweepVertices.begin(),dir)+grid_spacing;
 	long orderIndex=0;
-	for(std::set<Vertex>::iterator i=sweepVertices.begin(); i!=sweepVertices.end(); ++i)
+	for(std::vector<Vertex>::iterator i=sweepVertices.begin(); i!=sweepVertices.end(); ++i)
 	{
 		const Vertex& v=*i;
 		
@@ -349,34 +350,35 @@ void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,Ve
 				
 				float aInDir=dot(a,dir);
 				float bInDir=dot(b,dir);
+
+				assert(min(aInDir,bInDir)<sweepT+.00001f);
+				assert(sweepT<max(aInDir,bInDir));
+
 				float d=bInDir-aInDir;
 				float t=(sweepT-aInDir)/(bInDir-aInDir);
 				
-				if(t>=0 && t<=1)
-				{
-					Vertex intersection={
-						a.x+t*(b.x-a.x),
-						a.y+t*(b.y-a.y),
-						a.z // z const in layer
-					};
-					intersections.push_back(intersection);
-				}
-
+				assert(t>=0 && t<=1);
+				Vertex intersection={
+					a.x+t*(b.x-a.x),
+					a.y+t*(b.y-a.y),
+					a.z // z const in layer
+				};
+				intersections.push_back(intersection);
 			}
 //			assert(intersections.size() % 2 == 0);
 
 			std::sort(intersections.begin(), intersections.end(),orderOrthogonal);
 
 //			printf("\t\tSweep at y: %f, x's: ",y);
-			long pathIndex=0;
+			long pathIndex=1;
 			for(int j=0; j<intersections.size(); j++){
 				//printf(" %lf ",dot(intersections[j],dirOrthogonal));
-				if(j%2==1 && distance(intersections[j-1],intersections[j])>0.1) {
+				if(j%2==1 && distance(intersections[j-1],intersections[j])>1) {
 					Segment s={
 						NULL,
 						{intersections[j-1],intersections[j]},
 						{NULL,NULL},
-						pathIndex<<16 + orderIndex
+						pathIndex*0x10000L + orderIndex
 						 
 					};
 
@@ -384,6 +386,7 @@ void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>,Ve
 					pathIndex++;
 				}
 			}
+		
 //			printf("\n %d ",intersections.size());
 //			printf("%d ",intersections.size());
 //			printf("\n");	
@@ -565,19 +568,14 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 
 	printf("Saving Gcode...\n");
 	FILE* file=fopen(filename,"w");	
-/*
-G92 E0
-G1 Z8.000 F7800.000
-G1 X90.263 Y90.263
-G1 F1800.000 E1.00000
-G1 X109.737 Y90.263 F1800.000 E1.57267
-G1 X109.737 Y109.737 E2.14534
-G1 X90.263 Y109.737 E2.71801
-G1 X90.263 Y90.787 E3.27524
-G1 F1800.000 E2.27524
 
-*/
-	float extrusionFactor=0.0294f;
+	float filamentDiameter=3.f;
+	float nozzleDiameter=0.5f;
+	float layerHeight=.3f;
+	float filamentArea=3.14159f*filamentDiameter*filamentDiameter/4;
+	float extrusionVolume=nozzleDiameter*layerHeight;
+	
+	float extrusionFactor=extrusionVolume/filamentArea;
 	float retractLength=1.f;
 
 	Vertex offset={75.f, 75.f, 0.f};
@@ -588,6 +586,8 @@ G1 F1800.000 E2.27524
 	float travelled=0, extruded=0;
 
 	float skipDistance=.01;
+	
+	float retractDistance=1.1f;
 
 	for(int i=0; i<layers.size(); i++){
 		Layer& l=layers[i];
@@ -601,33 +601,44 @@ G1 F1800.000 E2.27524
 			assert(v0.z==l.z);
 			assert(v1.z==l.z);
 	
-			fprintf(file,"# %ld\n",l.segments[j].orderIndex);
-			//if(l.segments[j].orderIndex< 1L<<16) continue;
+			// fprintf(file,"# %ld\n",l.segments[j].orderIndex);
 			
 			if(distance(v1,position)<distance(v0,position))
 				swap(v0,v1);
 			
-			if(distance(v0,position)>skipDistance){
+			float d=distance(v0,position);
+			if(d>skipDistance){
+				if(d>retractDistance){
+					extrusion-=retractLength;
+					fprintf(file,"G1 F1800.0 E%f\n",extrusion);
+					//G92 E0
+				}
 				fprintf(file,"G1 X%f Y%f\n",v0.x+offset.x,v0.y+offset.y);
+				if(d>retractDistance){
+					extrusion+=retractLength;
+					fprintf(file,"G1 F1800.0 E%f\n",extrusion);
+					longTravels++;
+				}
 				travels++;
-				if(distance(v0,position)>20.0f) longTravels++;
 				travelled+=distance(v0,position);
+				position=v0;
 			}else
 				travelsSkipped++;
-			position=v0;
+			
 			extrusion+=extrusionFactor*distance(v0,v1);
 			if(distance(v1,position)>skipDistance){
 				fprintf(file,"G1 X%f Y%f E%f\n",v1.x+offset.x,v1.y+offset.y,extrusion);
 				extrusions++;
 				extruded+=distance(v1,position);
+				position=v1;
 			}else
 				extrusionsSkipped++;
-			position=v1;
+			
 		}
 		extrusion-=retractLength;
 		fprintf(file, "G1 F1800.000 E%f\n",extrusion); // retraction restart		
 	}	
-	printf("Saving complete. %ld bytes written. %d travels %.0f mm, %d long travels, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, longTravels, travelled, extrusions, extruded, travelsSkipped, extrusionsSkipped);
+	printf("Saving complete. %ld bytes written. %d travels %.0f mm, %d long travels, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",ftell(file),travels, travelled, longTravels, extrusions, extruded, travelsSkipped, extrusionsSkipped);
 }
 
 int main(int argc, const char** argv)
