@@ -6,6 +6,13 @@ Early experimental Slic3r remake using C++
 The reason for this remake is the low performance of Slic3r on embedded platforms like the RaspberryPi. 
 I like to have a cheap embedded platform capable of quick slicing attached to the printer. 
 
+Build:
+	./make.sh
+
+Usage:
+	./Schlizzer inputfile.stl outputfile.gcode
+
+
 Important features missing in respect to Slic3r:
 
 - No discrimination of  'solid' and 'fill' areas, thus they are handled equally with fill_density=1 always.
