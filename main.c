@@ -62,11 +62,27 @@ float distance(Vertex& a, Vertex& b){
 	float dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
 	return sqrt(dx*dx+dy*dy+dz*dz);
 }
-// difference of two vertices
+float length(Vertex& a){
+	return sqrt(dot(a,a));
+}
+Vertex operator*(const float a, const Vertex& b)
+{
+	Vertex r={a*b.x,a*b.y,a*b.z};
+	return r;
+}
+Vertex operator+(const Vertex& a, const Vertex& b)
+{
+	Vertex r={a.x+b.x,a.y+b.y,a.z+b.z};
+	return r;
+}
 Vertex operator-(const Vertex& a, const Vertex& b)
 {
-	Vertex r={a.x-b.x,a.y-b.y,a.z-b.z};
-	return r;
+	return a+(-1.f*b);
+}
+Vertex normalize(Vertex a){
+	float l=length(a);
+	if(l==0) return (Vertex){0,0,0};
+	return (1.f/l)*a;
 }
 // simple half ordering in z,y,x order
 // automatically used by orderes containers like std::set, std::map
@@ -94,6 +110,7 @@ struct VertexSweepOrder
 struct Triangle
 {
 	Vertex* vertices[3];
+	Vertex normal;
 };
 void sortTriangleVertices(Triangle& t)
 {
@@ -122,6 +139,7 @@ struct Segment
 	// these are used temporary and are invalidated later. do not use them:
 	std::array<Segment*,2> neighbours; // pointers to this segment adjacent ones
 	long orderIndex;  // an index generated to order segments for efficient printing
+	Vertex normal;    // segment line normal
 };
 bool operator<(const Segment& a, const Segment& b){
 	return a.orderIndex<b.orderIndex;
@@ -180,17 +198,27 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 	
 	// collection of vertex indicies to reconstruct triangles after vertex merging
 	std::vector<int> indices;
+	// collection of triangle normals
+	std::vector<Vertex> normals;
 
 	printf("Loading %s...\n",filename);
 	FILE* file=fopen(filename,"r");	
 	char line[256];
+
 	while(!feof(file)){
 		// read file line by line
 		if(fgets(line, sizeof(line), file)){
-			Vertex p;
-			// we only scan for vertex definitions, their triangle linking is given by 
+			Vertex p,n;
+			// we scan for vertex definitions, their triangle linking is given by 
 			// groups of three consecutive definitions.
-			int found=sscanf(line," vertex %e %e %e",&p.x,&p.y,&p.z);
+			
+			// scan for triangle normal definition
+			int found=sscanf(line," facet normal %e %e %e",&n.x,&n.y,&n.z);
+			if(found) 				
+				normals.push_back(n);     // store triangle normal
+				
+			// scan for vertex definition
+			found=sscanf(line," vertex %e %e %e",&p.x,&p.y,&p.z);
 			if(found) { 
 				// we found a vertex declaration
 				// check if this vertex is already known
@@ -212,6 +240,7 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 
 	// if we read triangles only, there are triangles*3 vertex indices
 	assert(indices.size()%3 == 0);
+	assert(indices.size()==normals.size()*3);
 
 	// create triangles
 	for(int i=0; i<indices.size(); i+=3)
@@ -222,11 +251,13 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 			t.vertices[j]=&vertices[indices[i+j]];
 		// sort vertices bottom-up for later operations
 		sortTriangleVertices(t);
+		// store normal 
+		t.normal=normals[i/3];
 		// add triangle
 		triangles.push_back(t);	
 	}
 
-	printf("Loading complete: %d vertices read, %d unique, %d triangles.\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
+	printf("Loading complete: %d vertices read, %d unique, %d triangles\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
 }
 
 // create initialized layers and assign triangles to them
@@ -322,12 +353,16 @@ Vertex computeIntersection(Vertex& a, Vertex& b, float z)
 
 // compute intersection of a triangle with a z plane
 // the triangle vertices must be ordered in z 
-std::array<Vertex,2> computeSegment(Triangle& t, float z)
+Segment computeSegment(Triangle& t, float z)
 {
 	Vertex** vs=t.vertices;
 	
 	// two vertices to return
-	std::array<Vertex,2> segment;
+	Segment segment;
+	
+	segment.neighbours[0]=NULL;
+	segment.neighbours[1]=NULL;
+	segment.orderIndex=-1;
 
 	// triangle vertices are always ordered by z
 	assert(vs[0]->z<=vs[1]->z);
@@ -340,20 +375,97 @@ std::array<Vertex,2> computeSegment(Triangle& t, float z)
 	// so we just need to check the second vertex to decide which edges
 	// get intersected.	
 	if(z<vs[1]->z){
-		segment[0]=computeIntersection(*vs[0],*vs[1],z);
-		segment[1]=computeIntersection(*vs[0],*vs[2],z);
+		segment.vertices[0]=computeIntersection(*vs[0],*vs[1],z);
+		segment.vertices[1]=computeIntersection(*vs[0],*vs[2],z);
 	}else{
-		segment[0]=computeIntersection(*vs[1],*vs[2],z);
-		segment[1]=computeIntersection(*vs[0],*vs[2],z);
+		segment.vertices[0]=computeIntersection(*vs[1],*vs[2],z);
+		segment.vertices[1]=computeIntersection(*vs[0],*vs[2],z);
 	}
+
+	Vertex n=t.normal;
+	n.z=0; 	        // project normal to z plane
+	n=normalize(n); // renormalize z
+	segment.normal=n;	
 	
 	return segment;
 }
 
+// unify the vertices shared by more than one segment to a map that can be used to find adjacent segments.
+// for manifold geomertry, every vertex mappes to exactly two segments then.
+// however for non manifold geometry, segmentsByVertex can map to any number of segments.
+void unifySegmentVertices(std::vector<Segment>& segments, std::map<Vertex,std::vector<Segment*>>& segmentsByVertex)
+{
+	for(int i=0; i<segments.size(); i++)
+	{
+		Segment& s=segments[i];
+		for(int j=0; j<2; j++){
+			Vertex& v=s.vertices[j];
+			segmentsByVertex[v].push_back(&s);
+		}
+	}
+}
+
+// offset segments by moving them in normal direction and recompute vertices
+// this is used to match an extruded segment of certain width to the outer contour of the model
+// and place the infill inside of the perimeters
+void offsetSegments(std::vector<Segment>& segments, float offset)
+{
+	// unify segment vertices
+	// this map cannot be reused later as vertices get moved while offsetting
+	std::map<Vertex,std::vector<Segment*>> segmentsByVertex;
+	unifySegmentVertices(segments, segmentsByVertex);
+	
+	// offset all double connected vertices
+	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i)
+	{
+		Vertex v=i->first;
+		std::vector<Segment*>& ss=i->second;
+		// assert(ss.size()==2);   // disabled to accept non manifold
+		if(ss.size()!=2) continue; // ignore non manifold components
+
+		Vertex n1=ss[0]->normal, n2=ss[1]->normal;
+
+		// the new segment's endpoint is their intersecion point
+		// the intersection is moved along the sum of both segment normals. 
+		// so we need to compute how far it moves
+		float t=offset/(1+dot(n1,n2)); 
+		// t=1/2 for a straight vertex, t=1 for a right angle vertex, t->infinity for steep angle verticies
+		// so the question is what to do about steep angles. we could:
+		// - don't offset, thus violating the outer contour but keeping a long wall that might be wanted
+		// - do the offset, thus removing a far larger part of the object, but stay inside the perimeter
+
+		Vertex d=t*(n1+n2);
+		//assert(length(d)>=offset);
+		
+		// offset both segment matching endpoint
+		for(int j=0; j<2; j++){
+			Segment& s=*ss[j];
+			if      (s.vertices[0]==v) s.vertices[0]=s.vertices[0]+d;
+			else if (s.vertices[1]==v) s.vertices[1]=s.vertices[1]+d;
+			else assert(!"Bad offset vertex!");		
+		}
+		
+		// TODO the offset vertices may introduce intersections to former manifold objects.
+		// we have to cut away those parts. for the infill, this could be done by a smart filling rule. 
+		// however, killed perimeters have to be removed too.
+	}
+}
+
 // compute 'infill', a hatching pattern to fill the inner area of a layer
 // it is made by a line grid alternating between +/-45 degree on odd and even layers
-void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>> segmentsByVertex)
+void fill(int layerIndex, Layer& layer)
 {
+
+	// make a offset copy of the contour to fill to avoid overlapping the perimeter
+	std::vector<Segment> segments=layer.segments;
+	// TODO how much should we shrink the contour here?
+	// about nozzle_diameter, because the extrusions would exactly touch then ?
+	// about nozzle_diameter/2, because the extrusions would definitely merge then?
+	// a larger value tends to make gaps in thin walls. try something inbetween now.
+	offsetSegments(segments,-get("nozzle_diameter")/1.5f);
+	
+	std::map<Vertex,std::vector<Segment*>> segmentsByVertex;
+	unifySegmentVertices(segments,segmentsByVertex);
 
 	// we compute the infill by using a 'plane sweep'.
 	// see http://en.wikipedia.org/wiki/Sweep_line_algorithm
@@ -443,7 +555,7 @@ void fill(int layerIndex, Layer& layer, std::map<Vertex,std::vector<Segment*>> s
 			// TODO as pathes are not identifiable, senseless travels occur where pathes appear and vanish
 			long pathIndex=1;
 			for(int j=0; j<intersections.size(); j++){
-				if(j%2==1 && distance(intersections[j-1],intersections[j])>1) {
+				if(j%2==1 && distance(intersections[j-1],intersections[j])>=.5f) {
 					Segment s={
 						{intersections[j-1],intersections[j]},
 						{NULL,NULL},
@@ -515,26 +627,24 @@ void buildSegments(int layerIndex, Layer& layer)
 	for(int i=0; i<layer.triangles.size(); i++)
 	{
 		Triangle* t=layer.triangles[i];
-		Segment s={
-			computeSegment(*t,layer.z),
-			{NULL,NULL},
-			-1
-		};
+		Segment s=computeSegment(*t,layer.z);
+
+		// TODO what if a triangle is sliced at a very flat angle?
+		// those would give poor normals and may cause bad contour offsetting
+		float nl=length(s.normal);
+		assert(nl>0.99f && nl<1.01f);
+		
 		if(s.vertices[0]!=s.vertices[1]) 
 			layer.segments.push_back(s);
 	}
+
+	// offset segments inward to correct for extrusion diameter
+	offsetSegments(layer.segments,-get("nozzle_diameter")/2);
 	
 	// unify segment vertices
 	std::map<Vertex,std::vector<Segment*>> segmentsByVertex;
-	for(int i=0; i<layer.segments.size(); i++)
-	{
-		Segment& s=layer.segments[i];
-		for(int j=0; j<2; j++){
-			Vertex& v=s.vertices[j];
-			segmentsByVertex[v].push_back(&s);
-		}
-	}
-		
+	unifySegmentVertices(layer.segments, segmentsByVertex);
+	
 	// link segments by neighbour pointers using the unique vertex map 
 	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i)
 	{
@@ -611,7 +721,7 @@ void buildSegments(int layerIndex, Layer& layer)
 	// debug output	
 	// printf("\tTriangles: %d, segments: %d, vertices: %d, loops: %d\n",(int)layer.triangles.size(),(int)layer.segments.size(),(int)segmentsByVertex.size(),loops);
 
-	fill(layerIndex, layer,segmentsByVertex);
+	fill(layerIndex, layer);
 	std::sort(layer.segments.begin(), layer.segments.end());
 	// caution: the neighbour[..] and other segment pointers are invalid now! 
 }
