@@ -155,6 +155,7 @@ struct Layer
 
 // a map holding configuration values read from config.ini
 std::map<std::string, float> config;
+std::map<std::string, std::string> configString;
 
 // read a config value
 float get(const char* parameter){
@@ -164,6 +165,12 @@ float get(const char* parameter){
 	return config[parameter];
 }
 
+const char* getString(const char* parameter){
+	// ensure sure the value was set by the config file
+	assert(configString.count(parameter)==1);
+	
+	return configString[parameter].c_str();
+}
 
 // functions
 
@@ -176,11 +183,25 @@ void loadConfig(const char* filename){
 		if(fgets(line, sizeof(line), file)){
 			char name[256];
 			float value;
+			char valueString[1024];
 			// scan for one 'name = value' entry
-			// currenlty only handles single float values
+			// store single float values
 			int found=sscanf(line,"%s = %e",name, &value);
 			if(found) 
-				config[name]=value; // store to config map			
+				config[name]=value;
+			// also store value as string, useful for strings and other non-float parameters
+			found=sscanf(line,"%s = %[^\n]",name, valueString);
+			if(found){
+				int pos;
+				std::string s=valueString;
+				// replace \n by real newlines
+				std::string newlineEscape="\\n";
+				while ((pos = s.find(newlineEscape))!=-1) {
+					s.erase(pos, newlineEscape.length());
+					s.insert(pos, "\n");
+				}
+				configString[name]=s;
+			}
 		}
 	}
 	fclose(file);
@@ -261,7 +282,7 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 }
 
 // create initialized layers and assign triangles to them
-void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers)
+void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers, float &min_z)
 {
 
 	// we compute the infill by using a 'plane sweep'.
@@ -281,13 +302,13 @@ void buildLayers(std::vector<Triangle>& triangles, std::vector<Layer>& layers)
 			by_z.push_back(vi);
 		}
 	std::sort(by_z.begin(), by_z.end());
-
+	
 	// sweep heap: updated list of triangles touched by the current sweep plane
 	// and the number of triangle vertices already passed by the sweep plane
 	std::map<Triangle*,int> activeTriangles;
 
 	// print geometric height
-	float min_z=by_z.front().value;
+	min_z=by_z.front().value;
 	float max_z=by_z.back().value;
 	float layer_height=get("layer_height");
 	assert(layer_height>0);
@@ -528,7 +549,7 @@ void fill(int layerIndex, Layer& layer)
 				// compute intersection length on segment
 				float aInDir=dot(a,dir);
 				float bInDir=dot(b,dir);
-				assert(std::min(aInDir,bInDir)<sweepT+.00001f);
+				// assert(std::min(aInDir,bInDir)<sweepT+.00001f);
 				// assert(sweepT<max(aInDir,bInDir)); // disabled to accept non manifolds
 				float d=bInDir-aInDir;
 				float t=(sweepT-aInDir)/(bInDir-aInDir);
@@ -632,7 +653,7 @@ void buildSegments(int layerIndex, Layer& layer)
 		// TODO what if a triangle is sliced at a very flat angle?
 		// those would give poor normals and may cause bad contour offsetting
 		float nl=length(s.normal);
-		assert(nl>0.99f && nl<1.01f);
+		//assert(nl>0.99f && nl<1.01f);
 		
 		if(s.vertices[0]!=s.vertices[1]) 
 			layer.segments.push_back(s);
@@ -650,9 +671,10 @@ void buildSegments(int layerIndex, Layer& layer)
 	{
 		std::vector<Segment*>& ss=i->second;
 		
-		if(ss.size()==1) assert(!"Unconnected segment");
-		// disabled to accept non manifolds
+		// checks disabled to accept non manifolds		
+		//if(ss.size()==1) assert(!"Unconnected segment");
 		// if(ss.size()>2 ) assert(!"Non manifold segment");
+		if(ss.size()!=2) continue;
 		
 		Vertex v=i->first;
 		
@@ -730,11 +752,13 @@ void buildSegments(int layerIndex, Layer& layer)
 // iterates over the previously generated layers and emit gcode for every segment
 // uses some configuration values to decide when to retract the filament, how much 
 // to extrude and so on.
-void saveGcode(const char* filename, std::vector<Layer>& layers)
+void saveGcode(const char* filename, std::vector<Layer>& layers, float min_z)
 {
 
 	printf("Saving Gcode...\n");
 	FILE* file=fopen(filename,"w");	
+
+	fprintf(file,"%s",getString("start_gcode"));
 
 	// segments shorter than this are ignored
 	float skipDistance=.01;
@@ -755,20 +779,27 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 	float travelled=0, extruded=0;
 
 	// offset of the emitted Gcode coordinates to the .stl ones
-	Vertex offset={75,75,get("z_offset")};
+	Vertex offset={75,75,get("z_offset")-min_z};
 
 	Vertex position={0,0,0};
 	for(int i=0; i<layers.size(); i++){
 		Layer& l=layers[i];
 		fprintf(file, "G92 E0\n");                        // reset extrusion axis
-		fprintf(file, "G1 Z%f F7800.000\n",l.z+offset.z); // move to layer's z plane
-		float extrusion=retract_length; // extrusion axis position
+
+		float feedrate=(i==0) ? 500.f : 1800.f ;
+		fprintf(file, "G1 Z%f F%f\n",l.z+offset.z,feedrate); // move to layer's z plane
+
+		float extrusion=(i==0) ? 1 : 0; // extrusion axis position
 
 		for(int j=0; j<l.segments.size(); j++){
 			Vertex& v0=l.segments[j].vertices[0];
 			Vertex& v1=l.segments[j].vertices[1];
-			assert(v0.z==l.z);
-			assert(v1.z==l.z);
+			//assert(v0.z==l.z);
+			//assert(v1.z==l.z);
+			// skip segment with NaN or Infinity caused by numeric instablities
+			if(v0.z!=l.z) continue; 
+			if(v1.z!=l.z) continue;
+			
 	
 			// reorder segment for shorter or zero traveling
 			if(distance(v1,position)<distance(v0,position))
@@ -808,7 +839,10 @@ void saveGcode(const char* filename, std::vector<Layer>& layers)
 			}else   // the segment is to short to do extrusion
 				extrusionsSkipped++;			
 		}
-	}	
+	}
+
+	fprintf(file, "%s",getString("end_gcode"));
+
 	// print some statisitcs
 	printf("Saving complete. %ld bytes written. %d travels %.0f mm, %d long travels, %d extrusions %.0f mm, %d travel skips, %d extrusion skips\n",
 		ftell(file),travels, travelled, longTravels, extrusions, extruded, travelsSkipped, extrusionsSkipped);
@@ -834,14 +868,15 @@ int main(int argc, const char** argv)
 
 	// create layers and assign touched triangles to them
 	std::vector<Layer> layers;
-	buildLayers(triangles, layers);
+	float min_z;
+	buildLayers(triangles, layers, min_z);
 
 	// create printable segments for every layer
 	for(int i=0; i<layers.size(); i++)
 		buildSegments(i,layers[i]);
 
 	// save filled layers in Gcode format	
-	saveGcode(argv[2],layers);
+	saveGcode(argv[2],layers,min_z);
 	
 	return 0;
 }
