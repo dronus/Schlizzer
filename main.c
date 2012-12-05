@@ -478,6 +478,9 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 	// in every sweep step, this is updated to contain the segments that may intersect onto another
 	std::set<Segment*> sweepHeap;
 
+	// store which segments gets replaced
+	std::set<Segment*> segmentsRemoved;
+	
 	// sweep...
 	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
 		Vertex v=i->first;
@@ -489,9 +492,7 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 		// an area will always be limited by a pair of those both contours.
 		// thus we can find a self intersection just by the inversion of them.
 		// collect intersections	
-		std::vector<float>  leftIntersections;
-		std::vector<float> rightIntersections;
-		std::vector<
+		std::vector<pair<Segment*, float>> intersections;
 		for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
 			Segment& s=**j;
 			Vertex& a=s.vertices[0], &b=s.vertices[1];
@@ -500,16 +501,26 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 			if(t>=0 && t<=1){ // for manifolds this should always be true
 				float x=a.x+t*(b.x-a.x);
 				// store interection point and direction
-				if(s.normal.x<0)  leftIntersections.push_back(x);
-				else             rightIntersections.push_back(x);
+				intersections.push_back(pair<Segment*,float>(&s,x));
 			}
 		}
 		std::sort(intersections.begin(), intersections.end());
+		int level=0; // level of nested inner areas. can be <0 for flipped areas.
 		for(int j=0; j<leftIntersections.size() && j<rightIntersections.size(); j++){
-			if(leftIntersections(i			
-		}
-		
-		
+			Segment& s=*intersections[i].first;
+			float x=intersections[i].second;
+			float nx=s.normal.x;
+			if(nx<0){ // left contour, enter inner level
+				level++; 
+				if(level<=0) // still outside? then we have the contour of an flipped area.
+					segmentsRemoved.insert(&s); // mark it for removal
+			}else{ // right contour, exit inner level
+				if(level<=0) // we are already outside, so we have the contour of an flipped area.
+					segmentsRemoved.insert(&s); // mark it for removal
+				level--;				
+			}
+			//TODO: keep partial segments by compute exact intersections
+		}				
 		
 		std::vector<Segment*>& ss=segmentsByVertex[v]; // the segments touching this sweep point
 		// count segments linking the current vertex and already in the heap
@@ -544,7 +555,12 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 			sweepHeap.erase (ss[0]);
 			sweepHeap.erase (ss[1]);
 		}		
-	}	
+	}
+	
+	// now delete flipped segments
+	for(int i=0; i<segments.size(); i++)
+		if(segmentsRemoved.count(&segments[i])>0)
+			segments.erase(i);
 }
 
 // compute 'infill', a hatching pattern to fill the inner area of a layer
