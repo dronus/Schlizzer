@@ -466,10 +466,85 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 			else assert(!"Bad offset vertex!");		
 		}
 		
-		// TODO the offset vertices may introduce intersections to former manifold objects.
-		// we have to cut away those parts. for the infill, this could be done by a smart filling rule. 
-		// however, killed perimeters have to be removed too.
 	}
+	// the offset vertices may introduce intersections to former manifold objects.
+	// we have to cut away those parts. for the infill, this could be done by a smart filling rule. 
+	// however, killed perimeters have to be removed too. so we remove those parts here completely.
+	// do a plane sweep to find self-intersections..
+	segmentsByVertex.clear(); // we need to redo the unified map as vertices were moved by the offset
+	unifySegmentVertices(segments, segmentsByVertex);
+
+	// the plane sweep heap.
+	// in every sweep step, this is updated to contain the segments that may intersect onto another
+	std::set<Segment*> sweepHeap;
+
+	// sweep...
+	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
+		Vertex v=i->first;
+		std::vector<Segment*>& ss=i->second;
+		
+		// check for intersections in the current sweep area
+		// as all contours left of an inner area are moved right into that area, 
+		// and all contours right of an inner area move left preserving their order,
+		// an area will always be limited by a pair of those both contours.
+		// thus we can find a self intersection just by the inversion of them.
+		// collect intersections	
+		std::vector<float>  leftIntersections;
+		std::vector<float> rightIntersections;
+		std::vector<
+		for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
+			Segment& s=**j;
+			Vertex& a=s.vertices[0], &b=s.vertices[1];
+			float t=(v.y-a.y)/(b.y-a.y);			
+			// add intersection
+			if(t>=0 && t<=1){ // for manifolds this should always be true
+				float x=a.x+t*(b.x-a.x);
+				// store interection point and direction
+				if(s.normal.x<0)  leftIntersections.push_back(x);
+				else             rightIntersections.push_back(x);
+			}
+		}
+		std::sort(intersections.begin(), intersections.end());
+		for(int j=0; j<leftIntersections.size() && j<rightIntersections.size(); j++){
+			if(leftIntersections(i			
+		}
+		
+		
+		
+		std::vector<Segment*>& ss=segmentsByVertex[v]; // the segments touching this sweep point
+		// count segments linking the current vertex and already in the heap
+		char segments_in_heap=0; // number of segments already in heap
+		char segment_index=-1;   // store segment already there
+		// ignore non manifold unconnected segments
+		if(ss.size()!=2) continue;
+		for(int j=0; j<ss.size(); j++){
+			assert(ss[j]->vertices[0]==v || ss[j]->vertices[1]==v);
+			if(sweepHeap.count(ss[j])==1) {
+				segments_in_heap++;
+				segment_index=j;
+			}
+		}
+
+		// assert(segments_in_heap<=2); // disabled to accept non manifolds
+
+		// now we can decide what happens at this sweep coordinate
+		if(segments_in_heap==0){
+			// a new perimeter is encountered. add it to the heap.
+			// as perimeters are closed, there are two segments spawning from this new vertex
+			sweepHeap.insert(ss[0]);
+			sweepHeap.insert(ss[1]);
+		}else if(segments_in_heap==1){
+			// an existing perimeter continues, segment_index must be it's index.
+			// so remove this old segment and add the new one
+			sweepHeap.erase (ss[  segment_index]);
+			sweepHeap.insert(ss[1-segment_index]);
+		}else if(segments_in_heap==2){
+			// an existing perimeter ends. 
+			// as perimeters are closed, there are two segments ending here.
+			sweepHeap.erase (ss[0]);
+			sweepHeap.erase (ss[1]);
+		}		
+	}	
 }
 
 // compute 'infill', a hatching pattern to fill the inner area of a layer
