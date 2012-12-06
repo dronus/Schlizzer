@@ -1,2 +1,2 @@
 #!/bin/sh
-g++ -O3  -std=c++0x  main.c -o Schlizzer
+g++  -std=c++0x  main.c -o Schlizzer

@@ -34,7 +34,8 @@
 #include <vector>
 #include <map>
 #include <set>
-#include <algorithm>
+#include <algorithm> // for std::sort
+#include <utility>   //f or pair ordering operators
 #include <array>
 #include <math.h>
 #include <exception>
@@ -426,6 +427,49 @@ void unifySegmentVertices(std::vector<Segment>& segments, std::map<Vertex,std::v
 	}
 }
 
+
+void intersectSegmentSegments(Segment& s, std::set<Segment*>& ss, std::map<Segment*,std::vector<Vertex>>& intersections){
+	
+	float x1=s.vertices[0].x, y1=s.vertices[0].y;
+	float x2=s.vertices[1].x, y2=s.vertices[1].y;	
+	for(std::set<Segment*>::iterator i=ss.begin(); i!=ss.end(); ++i){
+		Segment& s2=**i;
+
+		double x3=s2.vertices[0].x, y3=s2.vertices[0].y;
+		double x4=s2.vertices[1].x, y4=s2.vertices[1].y;	
+			
+		double denom =  x1 * ( y4 - y3 ) + x2 * ( y3 - y4 ) + x4 * ( y2 - y1 ) + x3 * ( y1 - y2 ) ;
+		if(denom==0) continue;  // segments are parallel
+		
+		double numer1 =     x1 * ( y4 - y3 ) + x3 * ( y1 - y4 ) + x4 * ( y3 - y1 );
+		double numer2 = - ( x1 * ( y3 - y2 ) + x2 * ( y1 - y3 ) + x3 * ( y2 - y1 ) );
+
+		// line parameters s,t
+		double ts  = numer1 / denom;
+		double ts2 = numer2 / denom;
+
+		// if line parameter is outside of one of the both segments there is no segment intersection
+		if(ts<=0 || ts>=1 || ts2<=0 || ts2>=1) continue;
+
+		// intersection position
+		double x = x1 + ts * ( x2 - x1 );
+		double y = y1 + ts * ( y2 - y1 );
+
+		Vertex v={(float)x,(float)y,s.vertices[0].z};
+		
+		// add intersection points to both segments
+		intersections[&s ].push_back(v);
+		intersections[&s2].push_back(v);	
+	}
+}
+
+Vertex* other(Segment& s, Vertex& v)
+{
+	if(v==s.vertices[0])       return &s.vertices[1];
+	else if(v==s.vertices[1])  return &s.vertices[0];
+	assert(!"bad other");
+}
+
 // offset segments by moving them in normal direction and recompute vertices
 // this is used to match an extruded segment of certain width to the outer contour of the model
 // and place the infill inside of the perimeters
@@ -467,10 +511,12 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 		}
 		
 	}
+	
 	// the offset vertices may introduce intersections to former manifold objects.
 	// we have to cut away those parts. for the infill, this could be done by a smart filling rule. 
 	// however, killed perimeters have to be removed too. so we remove those parts here completely.
 	// do a plane sweep to find self-intersections..
+
 	segmentsByVertex.clear(); // we need to redo the unified map as vertices were moved by the offset
 	unifySegmentVertices(segments, segmentsByVertex);
 
@@ -478,51 +524,16 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 	// in every sweep step, this is updated to contain the segments that may intersect onto another
 	std::set<Segment*> sweepHeap;
 
-	// store which segments gets replaced
-	std::set<Segment*> segmentsRemoved;
+	// the intersections found, mapped to the intersecting segments
+	std::map<Segment*,std::vector<Vertex>> intersections;
 	
 	// sweep...
-	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i){
+	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i)
+	{	
 		Vertex v=i->first;
-		std::vector<Segment*>& ss=i->second;
+		std::vector<Segment*>& ss=i->second;		
 		
-		// check for intersections in the current sweep area
-		// as all contours left of an inner area are moved right into that area, 
-		// and all contours right of an inner area move left preserving their order,
-		// an area will always be limited by a pair of those both contours.
-		// thus we can find a self intersection just by the inversion of them.
-		// collect intersections	
-		std::vector<pair<Segment*, float>> intersections;
-		for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
-			Segment& s=**j;
-			Vertex& a=s.vertices[0], &b=s.vertices[1];
-			float t=(v.y-a.y)/(b.y-a.y);			
-			// add intersection
-			if(t>=0 && t<=1){ // for manifolds this should always be true
-				float x=a.x+t*(b.x-a.x);
-				// store interection point and direction
-				intersections.push_back(pair<Segment*,float>(&s,x));
-			}
-		}
-		std::sort(intersections.begin(), intersections.end());
-		int level=0; // level of nested inner areas. can be <0 for flipped areas.
-		for(int j=0; j<leftIntersections.size() && j<rightIntersections.size(); j++){
-			Segment& s=*intersections[i].first;
-			float x=intersections[i].second;
-			float nx=s.normal.x;
-			if(nx<0){ // left contour, enter inner level
-				level++; 
-				if(level<=0) // still outside? then we have the contour of an flipped area.
-					segmentsRemoved.insert(&s); // mark it for removal
-			}else{ // right contour, exit inner level
-				if(level<=0) // we are already outside, so we have the contour of an flipped area.
-					segmentsRemoved.insert(&s); // mark it for removal
-				level--;				
-			}
-			//TODO: keep partial segments by compute exact intersections
-		}				
-		
-		std::vector<Segment*>& ss=segmentsByVertex[v]; // the segments touching this sweep point
+		//std::vector<Segment*>& ss=segmentsByVertex[v]; // the segments touching this sweep point
 		// count segments linking the current vertex and already in the heap
 		char segments_in_heap=0; // number of segments already in heap
 		char segment_index=-1;   // store segment already there
@@ -542,25 +553,106 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 		if(segments_in_heap==0){
 			// a new perimeter is encountered. add it to the heap.
 			// as perimeters are closed, there are two segments spawning from this new vertex
+			intersectSegmentSegments(*ss[0], sweepHeap, intersections);
+			intersectSegmentSegments(*ss[1], sweepHeap, intersections);			
 			sweepHeap.insert(ss[0]);
-			sweepHeap.insert(ss[1]);
+			sweepHeap.insert(ss[1]);			
 		}else if(segments_in_heap==1){
 			// an existing perimeter continues, segment_index must be it's index.
 			// so remove this old segment and add the new one
 			sweepHeap.erase (ss[  segment_index]);
 			sweepHeap.insert(ss[1-segment_index]);
+			intersectSegmentSegments(*ss[1-segment_index], sweepHeap, intersections);
 		}else if(segments_in_heap==2){
 			// an existing perimeter ends. 
 			// as perimeters are closed, there are two segments ending here.
-			sweepHeap.erase (ss[0]);
-			sweepHeap.erase (ss[1]);
+			sweepHeap.erase(ss[0]);
+			sweepHeap.erase(ss[1]);
 		}		
 	}
+
+	// now cut segments by their intersections. 
+	std::vector<Segment> cuttedSegments;
+	for(int i=0; i<segments.size(); i++){
+		Segment& s=segments[i];
+		if(intersections.count(&s)==0) cuttedSegments.push_back(s); // no intersection, add whole segment
+		else{
+			Segment cutted=s; // copy
+			// sort cut points
+			std::vector<Vertex>& cutVertices=intersections[&s];
+			std::sort(cutVertices.begin(),cutVertices.end());
+			// emit new segments
+			Vertex v0=s.vertices[0];
+			Vertex v1=s.vertices[1];
+			if(v1<v0) std::swap(v0,v1);
+			Segment cutS={{v0,cutVertices[0]},{NULL,NULL},-1,s.normal};
+			cuttedSegments.push_back(cutS);
+			for(int j=0; j<cutVertices.size()-1; j++){
+				Segment cutS2={{cutVertices[j],cutVertices[j+1]},{NULL,NULL},-1,s.normal};
+				cuttedSegments.push_back(cutS2);
+			}
+			Segment cutS3={{cutVertices[cutVertices.size()-1],v1},{NULL,NULL},-1,s.normal};
+			cuttedSegments.push_back(cutS3);
+		}
+	}
 	
-	// now delete flipped segments
-	for(int i=0; i<segments.size(); i++)
-		if(segmentsRemoved.count(&segments[i])>0)
-			segments.erase(i);
+
+	
+	// now find reversed areas, where a contour wrapped over another and eliminate them. 
+	// the intersections are easily found by vertices joining more than 2 segments.
+	// we also find bad areas from non manifold objects this way, which helps to clean up
+	// at every intersection, we decide the segments to be a valid outer contour or not.
+	segmentsByVertex.clear(); // we need to redo the unified map again...
+	unifySegmentVertices(cuttedSegments, segmentsByVertex);
+	
+	std::set<Segment*> badSegments;
+	
+	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i)
+	{	
+		Vertex v=i->first;
+		std::vector<Segment*>& ss=i->second;
+
+		if(ss.size()<2) continue; // ignore disconnected parts for now
+		if(ss.size()>2) {
+			// we encountered a node between more than one contour
+			// we now try to detect edges in outer area and mark them for deletion.
+			for(int j=0; j<ss.size(); j++){
+				Segment& sj=*ss[j];
+				//if(badSegments.count(&sj)==1) continue;
+				Vertex    v2=*other(sj,v);
+				Vertex d=v2-v;
+				for(int k=0; k<ss.size(); k++){
+					if(j==k) continue;
+					Segment& sk=*ss[k];
+					//if(badSegments.count(&sk)==1) continue;
+					if(dot(d,sk.normal)>0.000001f) {// sj is on the outer side of sk
+						Segment* badS=&sj;
+						Vertex from=v;
+						badSegments.insert(badS); // blame sj
+						while(true){  
+							// mark whole contour until the next intersection
+							Vertex to=*other(*badS,from);
+							std::vector<Segment*> ss2=segmentsByVertex[to];
+							if(ss2.size()==1) break; // non manifold contour ends
+							if(ss2.size()> 2) break; // intersection reached
+							if(ss2[0]==badS) badS=ss2[1];
+							else             badS=ss2[0];
+							badSegments.insert(badS); // blame connected 
+							from=to;
+						};
+					}
+				}
+			}
+		}
+	}
+//	badSegments.clear();
+	printf("intersections: %d  segments: %d cutted segments: %d bad segments: %d ", intersections.size(),segments.size(),cuttedSegments.size(),badSegments.size());
+
+	// now copy non flipped segments
+	segments.clear();
+	for(int i=0; i<cuttedSegments.size(); i++)
+		if(badSegments.count(&cuttedSegments[i])==0)
+			segments.push_back(cuttedSegments[i]);
 }
 
 // compute 'infill', a hatching pattern to fill the inner area of a layer
@@ -575,6 +667,9 @@ void fill(int layerIndex, Layer& layer)
 	// about nozzle_diameter/2, because the extrusions would definitely merge then?
 	// a larger value tends to make gaps in thin walls. try something inbetween now.
 	offsetSegments(segments,-get("nozzle_diameter")/1.5f);
+	
+	// the offset may be empty
+	if(segments.size()==0) return;
 	
 	std::map<Vertex,std::vector<Segment*>> segmentsByVertex;
 	unifySegmentVertices(segments,segmentsByVertex);
@@ -834,7 +929,7 @@ void buildSegments(int layerIndex, Layer& layer)
 	// debug output	
 	// printf("\tTriangles: %d, segments: %d, vertices: %d, loops: %d\n",(int)layer.triangles.size(),(int)layer.segments.size(),(int)segmentsByVertex.size(),loops);
 
-	fill(layerIndex, layer);
+	// fill(layerIndex, layer);
 	std::sort(layer.segments.begin(), layer.segments.end());
 	// caution: the neighbour[..] and other segment pointers are invalid now! 
 }
