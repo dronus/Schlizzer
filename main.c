@@ -275,8 +275,10 @@ void loadStl(const char* filename, std::vector<Vertex>& vertices, std::vector<Tr
 		sortTriangleVertices(t);
 		// store normal 
 		t.normal=normals[i/3];
-		// add triangle
-		triangles.push_back(t);	
+		
+		// add triangle, if not vertical
+		if(t.normal.z<1.f && t.normal.z>-1.f) 
+			triangles.push_back(t);
 	}
 
 	printf("Loading complete: %d vertices read, %d unique, %d triangles\n",(int)indices.size(),(int)vertices.size(),(int)triangles.size());
@@ -531,6 +533,7 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 		
 	}
 	
+	
 	// the offset vertices may introduce intersections to former manifold objects.
 	// we have to cut away those parts. for the infill, this could be done by a smart filling rule. 
 	// however, killed perimeters have to be removed too. so we remove those parts here completely.
@@ -614,27 +617,31 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 			cuttedSegments.push_back(cutS3);
 		}
 	}
-	
 
-	// DEBUG
-	// intersection removal currently deactivated
-	return;
+	printf("%d intersections.\n", intersections.size());
+
+	
+	// // DEBUG
+	// // intersection removal currently deactivated
+	// return;
 	
 	// now find reversed areas, where a contour wrapped over another and eliminate them. 
 	// do a plane sweep again, and mark contours touching inner areas.
 	segmentsByVertex.clear(); // we need to redo the unified map again...
 	unifySegmentVertices(cuttedSegments, segmentsByVertex);
-	
 
 	// collection of good edges
 	std::set<Segment*> goodSegments;		
-		
 	
-	// sweep...
+	// sweep again...
+	sweepHeap.clear();
 	for(std::map<Vertex,std::vector<Segment*>>::iterator i=segmentsByVertex.begin(); i!=segmentsByVertex.end(); ++i)
 	{	
 		Vertex v=i->first;
 		std::vector<Segment*>& ss=i->second;		
+
+
+		std::vector<Segment*> newSegments;		
 		
 		//std::vector<Segment*>& ss=segmentsByVertex[v]; // the segments touching this sweep point
 		// count segments linking the current vertex and already in the heap
@@ -642,44 +649,77 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 		char segment_index=-1;   // store segment already there
 		// ignore non manifold unconnected segments
 
-//		std::vector<Segment*> newSegments;
-//		std::vector<Segment*> goneSegments;
+		// update sweep heap
 		for(int j=0; j<ss.size(); j++){
 			assert(ss[j]->vertices[0]==v || ss[j]->vertices[1]==v);
 			if(sweepHeap.count(ss[j])==1) {
-				segments_in_heap++;
-				segment_index=j;
+				// segment ist already in heap, so we hit it's second vertex, remove it.
 				sweepHeap.erase(ss[j]);
 			}else{
+				// a new segment appeared, so add it.
 				sweepHeap.insert(ss[j]);
+
+				// maybe we can decide on the segments faith here
+				// but for now, just note the new segment
+				newSegments.push_back(ss[j]);
 			}
 		}
 		
 		// fill-like line intersection check.
 		std::map<Vertex,Segment*> intersections;
-
 		for(std::set<Segment*>::iterator j=sweepHeap.begin(); j!=sweepHeap.end(); ++j){
 			Segment& s=**j;
 			Vertex& a=s.vertices[0], &b=s.vertices[1];
 			
-			// compute intersection length on segment
-			float t=(v.y-a.y)/(b.y-a.y);
-			
 			// add intersection
-		//	if(t>=0 && t<=1){ // for manifolds this should always be true
-				Vertex intersection={
-					a.x+t*(b.x-a.x),
-					v.y, // y exact intersection
-					v.z  // z const in layer
-				};
-				intersections[intersection]=&s;
-		//	}
-		}
-		// assert(intersections.size() % 2 == 0);  // disabled to accept non manifolds
+			Vertex intersection;
+			if     (a==v || b==v ) intersection=v; // the current sweep vertex is an vertex of the intersected segment
+			else if(b.y-a.y==0   ) intersection=a; // TODO a horizontal segment has no single intersection. what to do here?
+			else if(v.y-a.y==0   ) intersection=a; // the segment is touched on end a
+			else if(v.y-b.y==0   ) intersection=b; // the segment is touched on end b
+			else                                   // the segmemt is intersected inbetween 
+			{	
+				// compute intersection length on segment
+				float t = (v.y-a.y)/(b.y-a.y);
 
-		// sort intersections in x (they equal each other in prioritized dirs y and z) 
-		// std::sort(intersections.begin(), intersections.end());
+				intersection={  
+					a.x+t*(b.x-a.x), // x interpolated intersection 
+					v.y,             // y exact by intersection
+					v.z              // z exact const in layer
+				};
+			}
+			
+			intersections[intersection]=&s;
+		}
 		
+		
+		std::map<Vertex,Segment*>::iterator currentIntersection;
+		bool found=false;
+		int currentLevel=0;
+		// one of the intersections should be the current sweep vertex. find it.
+		for(std::map<Vertex,Segment*>::iterator j=intersections.begin(); j!=intersections.end(); ++j) {
+		
+			Vertex   vj=j->first;
+			Segment& sj=*j->second;
+
+			// update fill level
+			if(sj.normal.y>.99f || sj.normal.y<-.99f) // horizontal line.
+				// what about level?
+			else if(sj.normal.x<0){
+				level++;
+			}else{
+				level--;
+			}
+
+			if(vj==v) {
+				assert(!found);
+				found=true;
+				currentIntersection=j;
+				currentLevel=level;
+				break;
+			}
+		}
+		assert(newSegments.size()==0 || found);
 		
 		// add fill line segments
 		// the filling is toggled by the level raised or lowered at  every intersection, 
@@ -690,22 +730,12 @@ void offsetSegments(std::vector<Segment>& segments, float offset)
 //			Vertex&  v=j->first;
 			Segment& sj=*j->second;
 			
-			if(sj.normal.y>.99 || sj.normal.y<-.99) // vertical line, keep for now.
-				goodSegments.insert(&sj);
-			//else 
-			if(sj.normal.x<0){
-				level++;
-				if(level>0) goodSegments.insert(&sj);
-			}else{
-				if(level>0) goodSegments.insert(&sj);
-				level--;
-			}			
 			
 			// DEBUG:
 			// goodSegments.insert(&sj);
 			
 		}
-//		printf("%d ",level);
+		printf("%d ",level);
 	}
 
 //	badSegments.clear();
